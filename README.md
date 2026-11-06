@@ -1,64 +1,93 @@
-# OpenRouter Everything (`openrouter-everything`)
+![OpenRouter Everything logo: a neon lime mark over a globe](assets/openrouter-everything-readme.png)
 
-One `OPENROUTER_API_KEY` for every Hermes Agent modality — **Web Search (`openrouter:web_search`)**, **Web Fetch (`openrouter:web_fetch`)**, **Image Generation**, **Video Generation**, **Text-to-Speech (TTS)**, **Speech-to-Text (STT)**, **Probabilistic Decisions**, **Structured Field Extractions**, **Reranking**, and **Embeddings** — with live **model-task adequacy validation** that blocks mismatched models before spending tokens.
+# 🌐 OpenRouter Everything
 
-## Why
+Want your Hermes agent to search the web, create images, generate speech and more without setting up a different API key for each service?
 
-Setting up a multi-modal agent usually requires juggling 6+ separate API keys (one for web search, one for image generation, one for video, one for TTS, one for STT, etc.). OpenRouter exposes all of these capabilities under a single API key. `openrouter-everything` wires all of them into Hermes with curated defaults, per-action model switching, and a live adequacy guard so users cannot accidentally pass an image model to the video tool or a chat model to TTS.
+**OpenRouter Everything connects these tools to one OpenRouter API key.** Pick a model for each job, switch it when you need to, and check whether a model supports the task before using it.
 
-## Curated Defaults
+## 💡 Perfect for...
 
-| Capability | Hermes Surface | Default Model / Tool | Endpoint |
-|---|---|---|---|
-| **Text / Fast Aux** | `text` | `deepseek/deepseek-v4.1-flash-1017` | `POST /api/v1/chat/completions` |
-| **Web Search** | `web_search` provider | `openrouter:web_search` (`deepseek/deepseek-v4.1-flash-1017`, `engine=auto`) | `POST /api/v1/chat/completions` (`tools: [openrouter:web_search]`) |
-| **Web Extract** | `web_extract` provider | `openrouter:web_fetch` (`deepseek/deepseek-v4.1-flash-1017`, `engine=openrouter`) | `POST /api/v1/chat/completions` (`tools: [openrouter:web_fetch]`) |
-| **Image Gen** | `image_generate` provider | `google/gemini-nano-banana-2.1` | `POST /api/v1/chat/completions` / `POST /api/v1/images/generations` |
-| **Video Gen** | `video_generate` provider | `alibaba/wan-3.0-prime` | `POST /api/v1/videos` |
-| **Text-to-Speech** | `text_to_speech` provider | `fish-audio/drama-3` | `POST /api/v1/audio/speech` |
-| **Speech-to-Text** | `transcribe_audio` provider | `openai/whisper-large-v3-turbo` | `POST /api/v1/audio/transcriptions` |
-| **Decisions** | `openrouter_decide` tool | `typesafe/jev-1.14` | `POST /api/alpha/decisions` |
-| **Extractions** | `openrouter_extract_fields` tool | `cloudflare/clairic` | `POST /api/alpha/extractions` |
-| **Rerank** | `openrouter_rerank` tool | `cohere/rerank-v3.5` | `POST /api/v1/rerank` |
-| **Embeddings** | `openrouter_embed` tool | `google/gemini-embedding-2` | `POST /api/v1/embeddings` |
+- **🤖 AI agents:** Give Hermes web search, page fetching, image and video generation, and voice tools through OpenRouter.
+- **🔧 Builders:** Start with the included defaults, then choose different models for the jobs you care about.
+- **📚 RAG workflows:** Generate embeddings and rerank passages before using them in a retrieval pipeline.
+- **📋 Structured workflows:** Use the Decisions and Extractions tools to classify inputs and extract fields from text.
 
-## Quick Start
+## ✨ What's included
+
+- **🔑 One API key:** The plugin uses `OPENROUTER_API_KEY` for its OpenRouter requests. OpenRouter usage charges still apply.
+- **🌐 Search and fetch:** Search with `openrouter:web_search` and fetch pages with `openrouter:web_fetch`. Both have configurable engines.
+- **🎨 Images and video:** Use Hermes generation tools with an OpenRouter model selected for each.
+- **🎙️ Voice:** Generate speech from text and transcribe audio with separate TTS and STT models.
+- **🎯 Model checks:** The plugin checks OpenRouter's model catalog and reports known mismatches, such as an image model selected for video generation.
+- **🧩 Extra tools:** Make decisions, extract structured fields, rerank documents and create embeddings.
+
+## 📦 Default models and tools
+
+You can change each model. The search and fetch defaults use DeepSeek to call OpenRouter's server tools.
+
+| Capability | Hermes surface | Default model or tool | OpenRouter endpoint |
+| --- | --- | --- | --- |
+| Text setting | `text` | `deepseek/deepseek-v4.1-flash-1017` | `POST /api/v1/chat/completions` |
+| Web search | `web_search` provider | `openrouter:web_search`, DeepSeek, `engine=auto` | `POST /api/v1/chat/completions` |
+| Web fetch | `web_extract` provider | `openrouter:web_fetch`, DeepSeek, `engine=openrouter` | `POST /api/v1/chat/completions` |
+| Image generation | `image_generate` provider | `google/gemini-nano-banana-2.1` | `POST /api/v1/chat/completions` or `POST /api/v1/images/generations` |
+| Video generation | `video_generate` provider | `alibaba/wan-3.0-prime` | `POST /api/v1/videos` |
+| Text to speech | `text_to_speech` provider | `fish-audio/drama-3` | `POST /api/v1/audio/speech` |
+| Speech to text | `transcribe_audio` provider | `openai/whisper-large-v3-turbo` | `POST /api/v1/audio/transcriptions` |
+| Decisions | `openrouter_decide` tool | `typesafe/jev-1.14` | `POST /api/alpha/decisions` |
+| Field extraction | `openrouter_extract_fields` tool | `cloudflare/clairic` | `POST /api/alpha/extractions` |
+| Reranking | `openrouter_rerank` tool | `cohere/rerank-v3.5` | `POST /api/v1/rerank` |
+| Embeddings | `openrouter_embed` tool | `google/gemini-embedding-2` | `POST /api/v1/embeddings` |
+
+The plugin's `text` setting does not change your main Hermes chat model. Configure that separately in Hermes. Models and their availability can change on OpenRouter.
+
+## 🚀 Quick start
+
+You need [Hermes Agent](https://hermes-agent.nousresearch.com/docs) and an [OpenRouter API key](https://openrouter.ai/settings/keys).
 
 ```bash
-# 1. Install the plugin
-hermes plugins install openrouter-everything
+# Install directly from GitHub and enable the plugin
+hermes plugins install https://github.com/dadhalfdev/openrouter-everything
 hermes plugins enable openrouter-everything
 
-# 2. One-step setup: set OPENROUTER_API_KEY and activate across web, image_gen, video_gen, tts, and stt
+# Configure the key and activate the OpenRouter Everything providers
 hermes openrouter-everything setup
 
-# 3. Check status and adequacy across all 11 capabilities
+# See the configured models and active providers
 hermes openrouter-everything status
 ```
 
-## Switching Models & Adequacy Validation
+`setup` changes the active Hermes providers for web, image generation, video generation, TTS and STT. Review those changes before running it if you already use other providers. The interactive setup asks for your OpenRouter key when needed. API requests can incur charges based on the model, tool and usage.
 
-You can switch the model for any action via CLI, slash command (`/openrouter-everything`), or the `openrouter_everything_config` agent tool:
+## 🔄 Switch models and search engines
+
+Use the CLI, the `/openrouter-everything` slash command, or the `openrouter_everything_config` agent tool to inspect and change model settings.
 
 ```bash
-# List compatible OpenRouter models for a capability
+# List compatible models
 hermes openrouter-everything models video_gen
 hermes openrouter-everything models stt
 
-# Switch the STT model to Mistral Voxtral Mini Transcribe 3.0
+# Pick a different speech-to-text model
 hermes openrouter-everything set-model stt mistralai/voxtral-mini-transcribe-3-0
 
-# Switch the openrouter:web_search engine (auto | exa | parallel | perplexity | firecrawl | native)
+# Change the web search engine
 hermes openrouter-everything set-engine web_search parallel
 
-# Validate whether a model is adequate for a task
+# Check an image model against the video task
 hermes openrouter-everything validate video_gen google/gemini-nano-banana-2.1
 ```
 
-When a user selects an inadequate model for a task (for example, `google/gemini-nano-banana-2.1` for `video_gen`), the plugin blocks the assignment/request and explains what the model actually supports alongside recommended alternatives.
+Search engines: `auto`, `exa`, `parallel`, `perplexity`, `firecrawl` and `native`. Fetch engines: `openrouter`, `auto`, `exa`, `parallel`, `firecrawl` and `native`.
 
-## Disclosure (Catalog Rule 13)
+When the catalog is available, an incompatible model produces an explanation and suggested alternatives. If the catalog can't be reached, the plugin lets the request proceed and OpenRouter must validate it. A successful check doesn't guarantee that a model is available to your account or that a request will succeed.
 
-- **Network calls:** Sends HTTPS requests exclusively to `https://openrouter.ai/api/v1/*` and `https://openrouter.ai/api/alpha/*` (`decisions`, `extractions`) authenticated with `OPENROUTER_API_KEY` resolved via `agent.secret_scope.get_secret("OPENROUTER_API_KEY")`.
-- **File reads/writes:** Reads local reference images or audio files explicitly passed by the user/agent to `image_generate`, `video_generate`, or `transcribe_audio`. Writes generated images/videos/audio through Hermes's standard `save_*` provider helpers and updates `config.yaml` when the user invokes `set-model`, `set-engine`, or `setup`.
-- **No background processes, no shell execution, no telemetry, no self-updating code.**
+## 🔐 Privacy and disclosure
+
+- **Network:** Requests normally go to OpenRouter's `/api/v1/*` and `/api/alpha/*` endpoints. The API base URL can be overridden. Generated media may also be downloaded from URLs returned by the service.
+- **Credentials:** The plugin reads `OPENROUTER_API_KEY` through Hermes's profile-scoped secret access. Interactive setup can save the key through Hermes configuration.
+- **Files:** The plugin reads local reference images and audio files passed to its tools. It saves generated media and changes Hermes configuration when you run commands such as `setup`, `set-model` or `set-engine`.
+- **Background activity:** The plugin does not add a background process, run shell commands, send telemetry or update itself.
+
+Web fetch is model-mediated: the model receives the fetched content and returns a response, so treat the output as potentially incomplete or altered rather than a guaranteed verbatim copy.
