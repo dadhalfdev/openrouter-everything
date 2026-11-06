@@ -6,13 +6,6 @@ Want your Hermes agent to search the web, create images, generate speech and mor
 
 **OpenRouter Everything connects these tools to one OpenRouter API key.** Pick a model for each job, switch it when you need to, and check whether a model supports the task before using it.
 
-## 💡 Perfect for...
-
-- **🤖 AI agents:** Give Hermes web search, page fetching, image and video generation, and voice tools through OpenRouter.
-- **🔧 Builders:** Start with the included defaults, then choose different models for the jobs you care about.
-- **📚 RAG workflows:** Generate embeddings and rerank passages before using them in a retrieval pipeline.
-- **📋 Structured workflows:** Use the Decisions and Extractions tools to classify inputs and extract fields from text.
-
 ## ✨ What's included
 
 - **🔑 One API key:** The plugin uses `OPENROUTER_API_KEY` for its OpenRouter requests. OpenRouter usage charges still apply.
