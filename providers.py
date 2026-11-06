@@ -7,10 +7,15 @@ import base64
 import logging
 import mimetypes
 import os
+import stat
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+from hermes_constants import (
+    get_default_hermes_root, get_hermes_home, get_real_home, get_subprocess_home,
+)
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response as img_error_response,
@@ -300,21 +305,227 @@ class OpenRouterEverythingWebProvider(WebSearchProvider):
 # 2. Image Generation Provider
 # ---------------------------------------------------------------------------
 _ASPECT_MAP = {"square": "1:1", "landscape": "16:9", "portrait": "9:16"}
+_MAX_INPUT_IMAGE_BYTES = 25 * 1024 * 1024
+_BLOCKED_ENV_BASENAMES = frozenset({
+    ".env", ".env.local", ".env.development", ".env.production",
+    ".env.test", ".env.staging", ".envrc",
+})
+_HOME_CREDENTIAL_DIRS = (
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure",
+    ".config/gh", ".config/gcloud",
+)
+_HOME_CREDENTIAL_FILES = (".netrc", ".pgpass", ".npmrc", ".pypirc", ".git-credentials")
+_HERMES_CREDENTIAL_FILES = (
+    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env",
+    "webhook_subscriptions.json", "auth/google_oauth.json",
+    "cache/bws_cache.json", "cache/bws_cache.enc.json",
+)
+_HERMES_CREDENTIAL_DIRS = (
+    "mcp-tokens", "browser-profile", "vault", "pairing", "skills/.hub", *_HOME_CREDENTIAL_DIRS,
+)
+
+# Chat-completions models default to the conservative three-image prompt limit.
+# Dedicated Image API models have model-specific limits; its generic ceiling is 16.
+_CHAT_IMAGE_REFERENCE_LIMIT = 3
+_IMAGE_API_REFERENCE_LIMIT = 16
+_CHAT_MODEL_REFERENCE_LIMITS = {
+    "google/gemini-nano-banana-2.1": 14,
+}
+_IMAGE_API_MODEL_REFERENCE_LIMITS = {
+    "google/gemini-3.1-flash-lite-image": 14,
+    "google/gemini-3.1-flash-image": 14,
+    "openai/gpt-image-2": 16,
+    "openai/gpt-image-1-mini": 16,
+    "microsoft/mai-image-2.5": 1,
+    "microsoft/mai-image-2.5-pro": 1,
+    "x-ai/grok-imagine-image-quality": 3,
+    "krea/krea-2-medium": 1,
+    "krea/krea-2-medium-turbo": 1,
+    "qwen/qwen-image-3-pro": 4,
+}
+
+
+def _is_under(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _protected_local_path(path: Path) -> bool:
+    """Apply Hermes' credential-read policy to an already-resolved local path.
+
+    This is defense in depth, not a race-proof filesystem boundary. Ordinary
+    symlink aliases are caught by resolution; opened files also get a hard-link
+    count check below. Protected contents remain blocked even with valid media
+    magic bytes.
+    """
+    if path.name.lower() in _BLOCKED_ENV_BASENAMES:
+        return True
+
+    active_home = get_hermes_home().expanduser().resolve()
+    root = get_default_hermes_root().expanduser().resolve()
+    hermes_homes = {active_home, root}
+    # Also protect another profile's credential store, not just the active one.
+    profiles = root / "profiles"
+    if _is_under(path, profiles):
+        relative = path.relative_to(profiles)
+        if relative.parts:
+            hermes_homes.add(profiles / relative.parts[0])
+
+    homes: set[Path] = set()
+    for candidate in (Path.home(), Path(get_real_home()), get_subprocess_home()):
+        if candidate:
+            homes.add(Path(candidate).expanduser().resolve())
+    # A named profile can also own an isolated subprocess HOME.
+    homes.update(hermes_home / "home" for hermes_home in hermes_homes)
+    for home in homes:
+        if any(path == (home / name).resolve() for name in _HOME_CREDENTIAL_FILES):
+            return True
+        if any(_is_under(path, (home / directory).resolve()) for directory in _HOME_CREDENTIAL_DIRS):
+            return True
+
+    for hermes_home in hermes_homes:
+        if any(path == (hermes_home / name).resolve() for name in _HERMES_CREDENTIAL_FILES):
+            return True
+        if any(_is_under(path, (hermes_home / directory).resolve()) for directory in _HERMES_CREDENTIAL_DIRS):
+            return True
+    return False
+
+
+def _resolve_local_path(value: str, label: str) -> Path:
+    """Resolve and policy-check a local media path without silently dropping it."""
+    if not value:
+        raise ValueError(f"{label} is blank")
+    # Check Windows device/NT namespaces before resolve(): merely touching a
+    # remote UNC variant can initiate SMB authentication on Windows.
+    nt_form = value.replace("/", "\\")
+    if nt_form.startswith(("\\??\\", "\\\\.\\")) or (
+        nt_form.startswith("\\\\?\\")
+        and nt_form[4:].upper().startswith(("UNC\\", "GLOBALROOT\\"))
+    ):
+        raise ValueError(f"{label} uses a blocked Windows device/NT namespace path")
+    try:
+        path = Path(value).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} path could not be resolved") from exc
+    if _protected_local_path(path):
+        raise ValueError(f"{label} is a protected credential or internal Hermes path")
+    return path
+
+
+def _opened_file_stat(handle: Any, label: str) -> os.stat_result:
+    """Validate the opened object, not a potentially replaced directory entry."""
+    metadata = os.fstat(handle.fileno())
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} does not exist or is not a regular file")
+    if metadata.st_nlink > 1:
+        raise ValueError(f"{label} has multiple hard links and is not accepted")
+    return metadata
+
+
+def _declared_image_reference_limit(entry: dict[str, Any]) -> Optional[int]:
+    for key in ("max_reference_images", "max_refs"):
+        value = entry.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def _image_reference_limit(model_id: str, entry: dict[str, Any]) -> int:
+    declared = _declared_image_reference_limit(entry)
+    if declared is not None:
+        return declared
+    raw_endpoints = entry.get("endpoints")
+    endpoints = set(raw_endpoints) if isinstance(raw_endpoints, (list, tuple, set, frozenset)) else set()
+    use_chat = "/api/v1/chat/completions" in endpoints or not endpoints
+    if use_chat:
+        return _CHAT_MODEL_REFERENCE_LIMITS.get(model_id, _CHAT_IMAGE_REFERENCE_LIMIT)
+    if "/api/v1/images" in endpoints:
+        return _IMAGE_API_MODEL_REFERENCE_LIMITS.get(model_id, _IMAGE_API_REFERENCE_LIMIT)
+    return _CHAT_IMAGE_REFERENCE_LIMIT
+
+
+def _sniff_image_mime(raw: bytes) -> Optional[str]:
+    """Return a provider-safe raster MIME from magic bytes, never the filename."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _encode_image_bytes(raw: bytes) -> str:
+    if not raw:
+        raise ValueError("image reference is empty")
+    if len(raw) > _MAX_INPUT_IMAGE_BYTES:
+        raise ValueError("image reference exceeds the 25 MiB limit")
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        raise ValueError("image reference is not a supported PNG, JPEG, GIF, or WebP image")
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _load_image_reference(ref: str) -> str:
+    """Validate and convert one remote URL, data URL, or local image path.
+
+    Remote HTTP(S) URLs pass through unchanged for OpenRouter to fetch. Local and
+    inline inputs are size-capped and authenticated by content before any bytes
+    are put on the wire. Invalid inputs raise instead of being silently dropped.
+    """
+    value = str(ref or "").strip()
+    if not value:
+        raise ValueError("image reference is blank")
+    lowered = value.lower()
+    if lowered.startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        if not parsed.netloc:
+            raise ValueError("image URL has no host")
+        return value
+    if lowered.startswith("data:"):
+        header, separator, encoded = value.partition(",")
+        header_parts = header.lower().split(";")
+        if not separator or not header_parts[0].startswith("data:image/") or "base64" not in header_parts[1:]:
+            raise ValueError("only base64-encoded data:image/ URLs are supported")
+        # Refuse an oversized payload before allocating its decoded copy.
+        if len(encoded) > ((_MAX_INPUT_IMAGE_BYTES + 2) // 3) * 4 + 4:
+            raise ValueError("image data URL exceeds the 25 MiB limit")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("image data URL contains invalid base64") from exc
+        return _encode_image_bytes(raw)
+
+    parsed = urlparse(value)
+    if parsed.scheme and (len(parsed.scheme) > 1 or "://" in value):
+        raise ValueError(f"unsupported image reference scheme '{parsed.scheme}'; use HTTP(S), data:image/, or a local path")
+
+    path = _resolve_local_path(value, "image reference")
+    try:
+        if not path.is_file():
+            raise ValueError(f"image reference does not exist or is not a file: {value}")
+        with path.open("rb") as handle:
+            metadata = _opened_file_stat(handle, "image reference")
+            if metadata.st_size > _MAX_INPUT_IMAGE_BYTES:
+                raise ValueError("image reference exceeds the 25 MiB limit")
+            raw = handle.read(_MAX_INPUT_IMAGE_BYTES + 1)
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"could not read image reference: {value}") from exc
+    return _encode_image_bytes(raw)
 
 
 def _ref_to_data_or_url(ref: str) -> Optional[str]:
-    ref = str(ref or "").strip()
-    if not ref:
-        return None
-    if ref.startswith(("http://", "https://", "data:")):
-        return ref
-    p = Path(ref).expanduser().resolve()
     try:
-        raw = p.read_bytes()
-    except OSError:
+        return _load_image_reference(ref)
+    except (OSError, ValueError):
         return None
-    mime = mimetypes.guess_type(p.name)[0] or "image/png"
-    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 class OpenRouterEverythingImageProvider(ImageGenProvider):
@@ -330,7 +541,19 @@ class OpenRouterEverythingImageProvider(ImageGenProvider):
         return DEFAULTS["image_gen"]
 
     def capabilities(self) -> Dict[str, Any]:
-        return {"modalities": ["text", "image"], "max_reference_images": 14}
+        model_id = get_configured_model("image_gen")
+        entry = fetch_full_catalog().get(model_id) or {}
+        raw_architecture = entry.get("architecture")
+        architecture = raw_architecture if isinstance(raw_architecture, dict) else {}
+        input_modalities = architecture.get("input_modalities")
+        # Missing metadata is unknown, not evidence of edit support. Reference
+        # limits are selected for the actual model and API surface, not globalized.
+        if not isinstance(input_modalities, list) or "image" not in input_modalities:
+            return {"modalities": ["text"], "max_reference_images": 0}
+        return {
+            "modalities": ["text", "image"],
+            "max_reference_images": _image_reference_limit(model_id, entry),
+        }
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -348,9 +571,14 @@ class OpenRouterEverythingImageProvider(ImageGenProvider):
             mid = entry.get("id")
             if not mid:
                 continue
-            arch = entry.get("architecture") or {}
-            in_mods = arch.get("input_modalities") or ["text"]
-            strengths = "Text + Image editing" if "image" in in_mods else "Text-to-image"
+            raw_architecture = entry.get("architecture")
+            arch = raw_architecture if isinstance(raw_architecture, dict) else {}
+            raw_in_mods = arch.get("input_modalities")
+            in_mods = raw_in_mods if isinstance(raw_in_mods, list) else []
+            if not isinstance(raw_in_mods, list) or not raw_in_mods:
+                strengths = "Image generation (input modalities unavailable)"
+            else:
+                strengths = "Text + Image editing" if "image" in in_mods else "Text-to-image"
             if mid == default_id:
                 strengths = f"★ Default · {strengths}"
             rows.append({
@@ -404,11 +632,33 @@ class OpenRouterEverythingImageProvider(ImageGenProvider):
         if image_url:
             refs.append(str(image_url))
         if reference_image_urls:
-            refs.extend(str(r) for r in reference_image_urls if r)
+            refs.extend(reference_image_urls)
         if kwargs.get("reference_images"):
-            refs.extend(str(r) for r in kwargs["reference_images"] if r)
+            refs.extend(kwargs["reference_images"])
 
-        usable_refs = [u for r in refs if (u := _ref_to_data_or_url(r))]
+        if refs and entry:
+            raw_architecture = entry.get("architecture")
+            architecture = raw_architecture if isinstance(raw_architecture, dict) else {}
+            input_modalities = architecture.get("input_modalities")
+            if not isinstance(input_modalities, list) or "image" not in input_modalities:
+                return fail(
+                    f"Model '{model_id}' does not accept image inputs "
+                    f"(input_modalities={input_modalities}); choose an image-editing model.",
+                    "inadequate_model",
+                )
+        max_refs = _image_reference_limit(model_id, entry or {})
+        if len(refs) > max_refs:
+            return fail(
+                f"Model '{model_id}' accepts at most {max_refs} image references; "
+                f"received {len(refs)}. Remove extra references; none were dropped.",
+                "invalid_request",
+            )
+        usable_refs: list[str] = []
+        for index, ref in enumerate(refs):
+            try:
+                usable_refs.append(_load_image_reference(ref))
+            except (OSError, ValueError) as exc:
+                return fail(f"Invalid image reference {index + 1}: {exc}", "invalid_request")
         exact_ratio = _ASPECT_MAP.get(semantic_aspect, "1:1")
         headers = build_headers(api_key)
 
@@ -426,7 +676,7 @@ class OpenRouterEverythingImageProvider(ImageGenProvider):
                 "aspect_ratio": exact_ratio,
             }
             if usable_refs:
-                payload["input_references"] = [{"type": "image_url", "image_url": {"url": u}} for u in usable_refs[:14]]
+                payload["input_references"] = [{"type": "image_url", "image_url": {"url": u}} for u in usable_refs]
             try:
                 resp = requests.post(f"{base_url}/images/generations", headers=headers, json=payload, timeout=180.0)
                 if resp.status_code >= 400:
@@ -452,7 +702,7 @@ class OpenRouterEverythingImageProvider(ImageGenProvider):
 
         # Chat Completions multimodal image generation (supported by google/gemini-nano-banana-2.1, gpt-5.4-image-2, etc.)
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for u in usable_refs[:14]:
+        for u in usable_refs:
             content.append({"type": "image_url", "image_url": {"url": u}})
 
         chat_payload: dict[str, Any] = {
@@ -638,14 +888,25 @@ class OpenRouterEverythingVideoProvider(VideoGenProvider):
             sup_dur = list(entry.get("supported_durations") or [])
             payload["duration"] = int(_clamp_nearest(int(duration), sup_dur))
         if image_url:
-            part_url = _ref_to_data_or_url(image_url)
-            if not part_url:
-                return fail(f"Could not read image_url: {image_url}", "invalid_request")
+            try:
+                part_url = _load_image_reference(image_url)
+            except (OSError, ValueError) as exc:
+                return fail(f"Invalid image_url: {exc}", "invalid_request")
             payload["frame_images"] = [{"type": "image_url", "image_url": {"url": part_url}, "frame_type": "first_frame"}]
         if reference_image_urls:
-            ref_parts = [u for r in reference_image_urls[:3] if (u := _ref_to_data_or_url(r))]
-            if ref_parts:
-                payload["input_references"] = [{"type": "image_url", "image_url": {"url": u}} for u in ref_parts]
+            if len(reference_image_urls) > 3:
+                return fail(
+                    f"Model '{model_id}' accepts at most 3 reference images; "
+                    f"received {len(reference_image_urls)}. Remove extra references; none were dropped.",
+                    "invalid_request",
+                )
+            ref_parts: list[str] = []
+            for index, ref in enumerate(reference_image_urls):
+                try:
+                    ref_parts.append(_load_image_reference(ref))
+                except (OSError, ValueError) as exc:
+                    return fail(f"Invalid reference_image_urls[{index}]: {exc}", "invalid_request")
+            payload["input_references"] = [{"type": "image_url", "image_url": {"url": u}} for u in ref_parts]
         if audio is not None and entry.get("generate_audio", True):
             payload["generate_audio"] = bool(audio)
         if seed is not None and entry.get("seed", True):
@@ -853,12 +1114,22 @@ class OpenRouterEverythingSTTProvider(TranscriptionProvider):
                 "provider": self.name,
             }
 
-        p = Path(file_path)
+        try:
+            p = _resolve_local_path(str(file_path or "").strip(), "audio file")
+        except (OSError, ValueError) as exc:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": f"Invalid audio file: {exc}",
+                "error_type": "invalid_request",
+                "provider": self.name,
+            }
         if not p.is_file():
             return {
                 "success": False,
                 "transcript": "",
                 "error": f"Audio file not found: {file_path}",
+                "error_type": "invalid_request",
                 "provider": self.name,
             }
 
@@ -874,6 +1145,16 @@ class OpenRouterEverythingSTTProvider(TranscriptionProvider):
 
         try:
             with p.open("rb") as f:
+                try:
+                    _opened_file_stat(f, "audio file")
+                except (OSError, ValueError) as exc:
+                    return {
+                        "success": False,
+                        "transcript": "",
+                        "error": f"Invalid audio file: {exc}",
+                        "error_type": "invalid_request",
+                        "provider": self.name,
+                    }
                 resp = httpx.post(
                     f"{base_url}/audio/transcriptions",
                     headers={

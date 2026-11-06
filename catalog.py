@@ -234,8 +234,8 @@ def save_plugin_config_key(key: str, value: Any) -> None:
         if isinstance(vid_cfg, dict) and vid_cfg.get("provider") in (PROVIDER_ID, "openrouter", None):
             vid_cfg["model"] = value
     elif key == "tts":
-        tts_cfg = cfg.setdefault("tts", {})
-        if isinstance(tts_cfg, dict):
+        tts_cfg = cfg.get("tts")
+        if isinstance(tts_cfg, dict) and tts_cfg.get("provider") == PROVIDER_ID:
             tts_cfg["model"] = value
             or_tts = tts_cfg.setdefault(PROVIDER_ID, {})
             if isinstance(or_tts, dict):

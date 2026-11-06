@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from .catalog import (
-    ALPHA_BASE_URL, CAPABILITY_SPECS, DEFAULTS, PROVIDER_ID,
+    CAPABILITY_SPECS, DEFAULTS, PROVIDER_ID,
     build_headers, describe_model_capabilities, fetch_full_catalog,
     get_configured_model, has_credentials, list_models_for_capability,
     load_plugin_config, resolve_credentials, save_plugin_config_key,
@@ -15,6 +16,31 @@ from .catalog import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _alpha_base_url(base_url: str) -> str:
+    """Derive the alpha API root only from the canonical configured v1 layout."""
+    try:
+        parsed = urlsplit(base_url)
+        # Accessing port also validates malformed values such as ':not-a-port'.
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("Invalid OpenRouter API base URL.") from exc
+
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != "/api/v1"
+    ):
+        raise ValueError(
+            "OpenRouter alpha APIs require OPENROUTER_BASE_URL to be an HTTP(S) "
+            "URL ending in /api/v1, without credentials, query parameters, or fragments."
+        )
+    return urlunsplit((parsed.scheme, parsed.netloc, "/api/alpha", "", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -70,9 +96,17 @@ def handle_decide(args: Dict[str, Any], **kwargs: Any) -> str:
     if not state:
         return json.dumps({"success": False, "error": "'state' is required for openrouter_decide."})
 
-    api_key, _ = resolve_credentials()
+    api_key, base_url = resolve_credentials()
     if not api_key:
         return json.dumps({"success": False, "error": "OPENROUTER_API_KEY is not set."})
+    try:
+        alpha_base_url = _alpha_base_url(base_url)
+    except ValueError as exc:
+        return json.dumps({
+            "success": False,
+            "error": str(exc),
+            "error_type": "unsupported_base_url",
+        })
 
     model_id = get_configured_model("decision", explicit=args.get("model"))
     valid, err_msg, _ = validate_model_for_capability(model_id, "decision")
@@ -109,7 +143,7 @@ def handle_decide(args: Dict[str, Any], **kwargs: Any) -> str:
     }
     try:
         resp = httpx.post(
-            f"{ALPHA_BASE_URL}/decisions",
+            f"{alpha_base_url}/decisions",
             headers=build_headers(api_key),
             json=payload,
             timeout=30.0,
@@ -173,9 +207,17 @@ def handle_extract_fields(args: Dict[str, Any], **kwargs: Any) -> str:
     if not state or not isinstance(fields, dict) or not fields:
         return json.dumps({"success": False, "error": "Both 'state' and non-empty 'fields' dict are required."})
 
-    api_key, _ = resolve_credentials()
+    api_key, base_url = resolve_credentials()
     if not api_key:
         return json.dumps({"success": False, "error": "OPENROUTER_API_KEY is not set."})
+    try:
+        alpha_base_url = _alpha_base_url(base_url)
+    except ValueError as exc:
+        return json.dumps({
+            "success": False,
+            "error": str(exc),
+            "error_type": "unsupported_base_url",
+        })
 
     model_id = get_configured_model("extraction", explicit=args.get("model"))
     valid, err_msg, _ = validate_model_for_capability(model_id, "extraction")
@@ -192,7 +234,7 @@ def handle_extract_fields(args: Dict[str, Any], **kwargs: Any) -> str:
     payload = {"model": model_id, "state": state, "fields": fields}
     try:
         resp = httpx.post(
-            f"{ALPHA_BASE_URL}/extractions",
+            f"{alpha_base_url}/extractions",
             headers=build_headers(api_key),
             json=payload,
             timeout=30.0,

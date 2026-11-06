@@ -19,7 +19,10 @@ def setup_cli_parser(parser: argparse.ArgumentParser) -> None:
     sub.add_parser("status", help="Show current models, adequacy status, and active Hermes backends")
 
     p_setup = sub.add_parser("setup", help="One-step setup: configure OPENROUTER_API_KEY and activate all capabilities")
-    p_setup.add_argument("--api-key", help="Optional OpenRouter API key to save to .env")
+    p_setup.add_argument(
+        "--api-key",
+        help="Deprecated: save an API key from argv (exposed to process listings); omit for a hidden prompt",
+    )
     p_setup.add_argument("--activate-all", action="store_true", default=True, help="Set openrouter-everything as active provider for web, image_gen, video_gen, tts, stt")
 
     p_set = sub.add_parser("set-model", help="Switch the model for a capability (with adequacy validation)")
@@ -79,6 +82,18 @@ def _format_status_text() -> str:
     return "\n".join(lines)
 
 
+def _save_openrouter_api_key(api_key: str) -> None:
+    """Check Hermes' write policy before using its public .env save route."""
+    from hermes_cli.config import require_env_writable, save_env_value
+
+    require_env_writable("OPENROUTER_API_KEY", "set")
+    try:
+        save_env_value("OPENROUTER_API_KEY", api_key)
+    except (OSError, ValueError) as exc:
+        # Writer exceptions can contain user input; never relay them to the terminal.
+        raise ValueError("Hermes could not write the key to ~/.hermes/.env.") from exc
+
+
 def handle_cli(args: argparse.Namespace) -> None:
     cmd = getattr(args, "subcommand", None) or "status"
 
@@ -87,22 +102,46 @@ def handle_cli(args: argparse.Namespace) -> None:
         return
 
     if cmd == "setup":
-        from hermes_cli.config import save_env_value
+        import getpass
+        import sys
 
-        api_key = getattr(args, "api_key", None)
-        if api_key:
-            save_env_value("OPENROUTER_API_KEY", api_key.strip())
-            print("Saved OPENROUTER_API_KEY to ~/.hermes/.env")
-        elif not has_credentials():
-            import sys
-            if sys.stdin and sys.stdin.isatty():
+        supplied_key = getattr(args, "api_key", None)
+        try:
+            if supplied_key is not None:
+                api_key = supplied_key.strip()
+                if not api_key:
+                    raise ValueError("The OpenRouter API key cannot be empty.")
+                print(
+                    "WARNING: --api-key exposes the key in shell history and process listings; "
+                    "use the hidden prompt or OPENROUTER_API_KEY instead.",
+                    file=sys.stderr,
+                )
+                _save_openrouter_api_key(api_key)
+                print("Saved OPENROUTER_API_KEY to ~/.hermes/.env")
+            elif not has_credentials():
+                if not sys.stdin or not sys.stdin.isatty():
+                    print(
+                        "ERROR: No OpenRouter API key is configured and setup is non-interactive. "
+                        "Set OPENROUTER_API_KEY before running setup; avoid --api-key because argv is exposed.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
                 try:
-                    entered = input("Enter your OpenRouter API key (https://openrouter.ai/settings/keys): ").strip()
-                    if entered:
-                        save_env_value("OPENROUTER_API_KEY", entered)
-                        print("Saved OPENROUTER_API_KEY to ~/.hermes/.env")
-                except EOFError:
-                    pass
+                    api_key = getpass.getpass(
+                        "Enter your OpenRouter API key (input hidden; "
+                        "https://openrouter.ai/settings/keys): "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nERROR: OpenRouter API key entry was cancelled.", file=sys.stderr)
+                    raise SystemExit(1) from None
+                if not api_key:
+                    print("ERROR: The OpenRouter API key cannot be empty.", file=sys.stderr)
+                    raise SystemExit(1)
+                _save_openrouter_api_key(api_key)
+                print("Saved OPENROUTER_API_KEY to ~/.hermes/.env")
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: Could not save OPENROUTER_API_KEY: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
 
         activated = activate_all_providers_in_config()
         print(f"Activated '{PROVIDER_ID}' across Web, Image Gen, Video Gen, TTS, and STT.")

@@ -2,16 +2,50 @@ name: openrouter-everything
 version: "1.0.0"
 description: Unified OpenRouter multi-capability plugin (openrouter:web_search, openrouter:web_fetch, image gen, video gen, TTS, STT, decisions, extractions, rerank, embeddings) under one API key with model-task adequacy validation.
 author: Marco Rodrigues (Dad Half Dev)
-requires_hermes: ">=0.20.0"
+# Hermes 0.22.0 provides the setup credential-write policy API.
+requires_hermes: ">=0.22.0"
 requires_env:
   - OPENROUTER_API_KEY
+optional_env:
+  - name: OPENROUTER_BASE_URL
+    description: "OpenRouter v1 API base URL (default: https://openrouter.ai/api/v1)"
+    password: false
+  - name: OPENROUTER_TEXT_MODEL
+    description: "Override the text/chat model"
+    password: false
+  - name: OPENROUTER_WEB_SEARCH_MODEL
+    description: "Override the web-search chat model"
+    password: false
+  - name: OPENROUTER_WEB_FETCH_MODEL
+    description: "Override the web-fetch chat model"
+    password: false
+  - name: OPENROUTER_IMAGE_GEN_MODEL
+    description: "Override the image-generation model"
+    password: false
+  - name: OPENROUTER_VIDEO_GEN_MODEL
+    description: "Override the video-generation model"
+    password: false
+  - name: OPENROUTER_TTS_MODEL
+    description: "Override the text-to-speech model"
+    password: false
+  - name: OPENROUTER_STT_MODEL
+    description: "Override the speech-to-text model"
+    password: false
+  - name: OPENROUTER_DECISION_MODEL
+    description: "Override the decision model"
+    password: false
+  - name: OPENROUTER_EXTRACTION_MODEL
+    description: "Override the structured-extraction model"
+    password: false
+  - name: OPENROUTER_RERANK_MODEL
+    description: "Override the reranking model"
+    password: false
+  - name: OPENROUTER_EMBEDDINGS_MODEL
+    description: "Override the embeddings model"
+    password: false
 provides_tools:
   - openrouter_decide
   - openrouter_extract_fields
   - openrouter_rerank
   - openrouter_embed
   - openrouter_everything_config
-provides_cli_commands:
-  - openrouter-everything
-provides_slash_commands:
-  - openrouter-everything
