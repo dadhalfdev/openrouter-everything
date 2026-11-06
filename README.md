@@ -1,4 +1,4 @@
-![OpenRouter Everything logo: a neon lime mark over a globe](assets/openrouter-everything-readme.png)
+![OpenRouter Everything: neon lime globe logo and network](assets/openrouter-everything-banner.jpg)
 
 # 🌐 OpenRouter Everything
 
