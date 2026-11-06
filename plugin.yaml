@@ -1,0 +1,17 @@
+name: openrouter-everything
+version: "1.0.0"
+description: Unified OpenRouter multi-capability plugin (openrouter:web_search, openrouter:web_fetch, image gen, video gen, TTS, STT, decisions, extractions, rerank, embeddings) under one API key with model-task adequacy validation.
+author: Marco Rodrigues (Dad Half Dev)
+requires_hermes: ">=0.20.0"
+requires_env:
+  - OPENROUTER_API_KEY
+provides_tools:
+  - openrouter_decide
+  - openrouter_extract_fields
+  - openrouter_rerank
+  - openrouter_embed
+  - openrouter_everything_config
+provides_cli_commands:
+  - openrouter-everything
+provides_slash_commands:
+  - openrouter-everything
