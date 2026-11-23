@@ -1022,6 +1022,11 @@ class OpenRouterEverythingTTSProvider(TTSProvider):
         if resp_fmt == "ogg":
             resp_fmt = "opus"
 
+        # PCM-only models (HeyGen) reject every container except pcm, so ask for pcm and wrap it.
+        pcm_only = _tts_model_is_pcm_only(model_id)
+        if pcm_only:
+            resp_fmt = "pcm"
+
         payload: dict[str, Any] = {
             "model": model_id,
             "input": text,
@@ -1055,8 +1060,54 @@ class OpenRouterEverythingTTSProvider(TTSProvider):
 
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        if pcm_only:
+            rate, channels = _parse_pcm_content_type(resp.headers.get("Content-Type", ""))
+            frame_bytes = channels * _PCM_SAMPLE_WIDTH
+            raw = resp.content[: len(resp.content) - len(resp.content) % frame_bytes]
+            if not raw:
+                raise RuntimeError(f"OpenRouter TTS returned no PCM audio for '{model_id}'")
+            out = out.with_suffix(".wav")
+            out.write_bytes(_pcm_to_wav(raw, rate, channels))
+            return str(out)
         out.write_bytes(resp.content)
         return str(out)
+
+
+# Speech models whose endpoint accepts only raw PCM (HeyGen answers "only supports response_format pcm").
+_TTS_PCM_ONLY_PREFIXES = ("heygen/",)
+_PCM_SAMPLE_WIDTH = 2  # 16-bit signed little-endian, as the endpoint returns it
+_PCM_DEFAULT_RATE = 24000
+
+
+def _tts_model_is_pcm_only(model_id: str) -> bool:
+    return (model_id or "").lower().startswith(_TTS_PCM_ONLY_PREFIXES)
+
+
+def _parse_pcm_content_type(content_type: str) -> tuple[int, int]:
+    """Return ``(sample_rate, channels)`` from e.g. ``audio/pcm;rate=44100;channels=1``."""
+    rate, channels = _PCM_DEFAULT_RATE, 1
+    for part in (content_type or "").split(";")[1:]:
+        key, _, value = part.strip().partition("=")
+        value = value.strip()
+        if key.strip().lower() == "rate" and value.isdigit() and int(value) > 0:
+            rate = int(value)
+        elif key.strip().lower() == "channels" and value.isdigit() and int(value) > 0:
+            channels = int(value)
+    return rate, channels
+
+
+def _pcm_to_wav(pcm: bytes, sample_rate: int, channels: int) -> bytes:
+    """Wrap raw 16-bit PCM in a WAV container using the stdlib only."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(_PCM_SAMPLE_WIDTH)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
